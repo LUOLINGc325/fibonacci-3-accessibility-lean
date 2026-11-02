@@ -1,0 +1,12 @@
+fibonacci-3-accessibility-lean
+Copyright 2026 LUOLINGc325
+
+This repository is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The mathematics formalized here is that of the paper "The Fibonacci numbers are not
+3-accessible" by William J. Wesley (arXiv:2609.33744v1). The paper itself is not included.
+This repository is an independent formalization and is not affiliated with or endorsed by
+the paper's author.
+
+Lean 4 and Mathlib (Apache-2.0) are fetched by Lake at build time and are not included;
+their exact revisions are recorded in lake-manifest.json.

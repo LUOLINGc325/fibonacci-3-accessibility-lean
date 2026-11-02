@@ -1,0 +1,104 @@
+name: build
+
+# Clean build of all modules, a no-`sorry` check of the build log, and an axiom audit
+# of the three endpoint theorems, after checking their types.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install elan and the pinned toolchain
+        run: |
+          set -euo pipefail
+          retry() { for i in 1 2 3 4; do "$@" && return 0; echo "retry $i: $*" >&2; sleep $((i*15)); done; "$@"; }
+          installer=$(mktemp)
+          retry curl --fail --location --retry 3 https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$installer"
+          sh "$installer" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.elan/bin:$PATH"
+          retry elan toolchain install "$(cat lean-toolchain)"
+          lake --version
+
+      - name: Fetch Mathlib (official cache)
+        run: |
+          set -euo pipefail
+          retry() { for i in 1 2 3 4; do "$@" && return 0; echo "retry $i: $*" >&2; sleep $((i*15)); done; "$@"; }
+          retry lake exe cache get
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          for p in json.loads(Path('lake-manifest.json').read_text())['packages']:
+              actual = subprocess.check_output(['git', '-C', '.lake/packages/' + p['name'], 'rev-parse', 'HEAD'], text=True).strip()
+              if actual != p['rev']:
+                  raise SystemExit('Dependency revision mismatch: ' + p['name'])
+          print('All dependency revisions match the lockfile')
+          PY
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          lake build 2>&1 | tee build.log
+
+      - name: No sorry in the build log
+        run: |
+          if grep -nE "declaration uses ['\`]?sorry" build.log; then
+            echo "::error::build log contains 'declaration uses sorry'"; exit 1
+          fi
+          echo "no sorry warnings"
+
+      - name: Source scan
+        run: |
+          if grep -rnE "\\b(sorry|admit|native_decide|implemented_by|extern|skipKernelTC)\\b|^\\s*axiom\\b" FibAccess spec --include=*.lean; then
+            echo "::error::forbidden token in sources"; exit 1
+          fi
+          echo "source scan clean"
+
+      - name: Axiom audit
+        run: |
+          set -euo pipefail
+          lake env lean scripts/CheckStatement.lean 2>&1 | tee axioms.txt
+          python3 - <<'PY'
+          import re, sys
+          text = open('axioms.txt').read()
+          allowed = {'propext', 'Classical.choice', 'Quot.sound'}
+          found = {}
+          for name, axs in re.findall(r"'([^']+)' depends on axioms:\s*\[([^\]]*)\]", text):
+              found[name] = {a.strip() for a in axs.split(',') if a.strip()}
+          for name in re.findall(r"'([^']+)' does not depend on any axioms", text):
+              found[name] = set()
+          want = ['FibAccess.main', 'FibAccess.theorem1', 'FibAccess.main_nonvacuous']
+          bad = False
+          for w in want:
+              if w not in found:
+                  print('MISSING axiom report for', w); bad = True
+              elif found[w] - allowed:
+                  print('DISALLOWED axioms for', w, sorted(found[w] - allowed)); bad = True
+              else:
+                  print('OK', w, sorted(found[w]))
+          if re.search(r'(^|\n)\S*: error', text) or 'sorryAx' in text:
+              print('errors or sorryAx in output'); bad = True
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: axioms
+          path: |
+            axioms.txt
+            build.log
+          if-no-files-found: warn
